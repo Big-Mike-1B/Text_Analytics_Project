@@ -14,8 +14,7 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.svm import SVC
 from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score, classification_report
 from transformers import pipeline
-import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
 
 nltk.download('punkt')
 nltk.download('stopwords')
