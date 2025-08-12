@@ -58,9 +58,7 @@ def load_csv(path: Path) -> pd.DataFrame:
 if "img_index" not in st.session_state:
     st.session_state.img_index = 0
 
-# Auto-refresh every 3 seconds
-time.sleep(3)
-count = st.rerun()
+
 
 # Get current image
 current_image = IMAGE_FILES[st.session_state.img_index]
@@ -112,7 +110,7 @@ def label_emotions(data):
     for text in data['Text']:
         try:
             result = classifier(str(text))[0]
-            # Get emotion with highest score
+        # Get emotion with highest score
             top_emotion = max(result, key=lambda x: x['score'])['label']
             emotions.append(top_emotion)
         except:
