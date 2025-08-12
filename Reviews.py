@@ -33,7 +33,7 @@ IMAGE_FILES = [
     BASE / "Food1.jpeg",
     BASE / "Food2.jpeg"
     ]
-DATA_PATH = BASE / "data" / "Reviews.csv"
+DATA_PATH = BASE /"Reviews.csv"
 
 # ===================== UTILITIES =====================
 def get_base64_image(image_path: Path) -> str:
