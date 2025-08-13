@@ -107,7 +107,47 @@ def page2():
         st.success('File uploaded successfully')
 
     # Predict button creation
-    st.button("🔄 Predict")
+    if st.button("Predict"):
+        if user_input.strip():
+            cleaned_input = [user_input]  # Assuming clean_text is already implemented
+            input_tfidf = tfidf.transform(cleaned_input)
+            prediction = nb.predict(input_tfidf)[0]
+
+            if prediction == 'Positive':
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"Sentiment is: 😊 {prediction}")
+                with col2:
+                    image = Image.open("sabinus2.png")
+                    st.image(image)
+            else:
+                col3, col4 = st.columns(2)
+                with col3:
+                    st.write(f"Sentiment is: ☹️ {prediction}")
+                with col4:
+                    image1 = Image.open("sabinus.png")
+                    st.image(image1)
+
+        if file is not None:
+            try:
+                if file.name.endswith('.txt'):
+                    file_content = file.read().decode('utf-8').splitlines()
+                    file_df = pd.DataFrame({'story': file_content})
+                elif file.name.endswith('.csv'):
+                    file_df = pd.read_csv(file)
+
+                # Predict sentiments for file data
+                file_tfidf = tfidf.transform(file_df['story'])
+                file_predictions = nb.predict(file_tfidf)
+                file_df['Predicted Sentiment'] = file_predictions
+
+                st.success("File processed successfully!")
+                st.dataframe(file_df)
+
+            except Exception as e:
+                st.error(f"Error processing file: {e}")
+        elif not user_input.strip():
+            st.warning("Please enter text or upload a file before clicking Predict.")
 
 
 def page3():

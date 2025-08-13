@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import os
+os.environ["STREAMLIT_SERVER_MAX_UPLOAD_SIZE"] = "1024"  # Allow up to 1GB
 import streamlit as st
 import re
 import nltk
@@ -21,6 +23,11 @@ nltk.download('stopwords')
 import base64
 from pathlib import Path
 
+import mysql.connector
+from mysql.connector import Error
+from datetime import datetime
+import plotly.express as px
+
 
 
 # ===================== PAGE CONFIG =====================
@@ -33,7 +40,14 @@ IMAGE_FILES = [
     BASE / "Food1.jpeg",
     BASE / "Food2.jpeg"
     ]
-DATA_PATH = BASE /"Reviews.csv"
+# Upload CSV file
+uploaded_file = st.file_uploader("Upload your Reviews CSV file", type=["csv"])
+
+if uploaded_file is not None:
+    df_reviews = pd.read_csv(uploaded_file)
+    st.success("CSV file successfully loaded!")
+else:
+    st.warning("Please upload a CSV file to proceed.")
 
 # ===================== UTILITIES =====================
 def get_base64_image(image_path: Path) -> str:
@@ -92,7 +106,7 @@ st.markdown("""
 #Load Dataset
 @st.cache_data
 def load_data():
-    df = pd.read_csv("Reviews.csv")
+    df = pd.read_csv(uploaded_file)
     df_sample = df.sample(5000, random_state=42).reset_index(drop=True)
     return df_sample
 
@@ -103,7 +117,7 @@ df_reviews = load_data()
 @st.cache_resource
 def label_emotions(data):
     classifier = pipeline("text-classification",
-                          model="cardiffnlp/twitter-roberta-base-emotion",
+                          model="bhadresh-savani/distilbert-base-uncased-emotion",
                           top_k=None)
     emotions = []
     for text in data['Text']:
@@ -136,6 +150,15 @@ def clean_text(texts):
 
 df_labeled['clean_text'] = clean_text(df_labeled['Text'])
 
+#Tokenization
+words = word_tokenize(' '.join(df_labeled['clean_text']))
+tok_text = pd.DataFrame({'Tokens': words})
+
+# Display stop words from the nltk
+stop_words_disp = set(stopwords.words('english'))
+
+# Removal of the stopwords
+filtered_text = [word for word in words if word.lower() not in stop_words_disp]
 
 # Word Clouds
 def plot_wordcloud(emotion):
@@ -201,7 +224,7 @@ st.markdown("""
     }
     </style>
     """, unsafe_allow_html=True)
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dataset", "😊 Emotion Detection", "☁ Word Clouds", "✅ Conclusion"])
+tab1, tab2, tab3, tab4,tab5, tab6 = st.tabs(["📊 Dataset", "😊 Emotion Detection", "☁ Word Clouds", "✅ Conclusion","User Interface","Submitted Review"])
 
 #Streamlit Pages
 with tab1:
@@ -246,5 +269,97 @@ with tab4:
     """)
 
 
+with tab5:
+    # ===================== LOAD EMOTION MODEL =====================
+    @st.cache_resource
+    def load_emotion_model():
+        return pipeline("text-classification", model="bhadresh-savani/distilbert-base-uncased-emotion")
 
 
+    emotion_classifier = load_emotion_model()
+
+    # ===================== PAGE CONFIG =====================
+    st.set_page_config(page_title="🍽 Food Review App", page_icon="🍔", layout="centered")
+    st.title("🍽 Food Review & Feedback System")
+    st.write("Share your experience with our dishes!")
+
+    # ===================== CSV FILE PATH =====================
+    CSV_FILE = "food_reviews.csv"
+
+    # ===================== LOAD EXISTING REVIEWS =====================
+    if os.path.exists(CSV_FILE):
+        df_reviews = pd.read_csv(CSV_FILE)
+    else:
+        df_reviews = pd.DataFrame(columns=["Customer", "Food Item", "Rating", "Review", "Emotion", "Date"])
+
+    # ===================== REVIEW FORM =====================
+    with st.form("review_form", clear_on_submit=True):
+        customer_name = st.text_input("👤 Your Name")
+        food_item = st.text_input("🍔 Food Item")
+        rating = st.slider("⭐ Rating", 1, 5, 5)
+        review_text = st.text_area("📝 Write your review:", height=150)
+        submitted = st.form_submit_button("💾 Submit Review")
+
+        if submitted:
+            if customer_name.strip() and food_item.strip() and review_text.strip():
+                emotion_result = emotion_classifier(review_text)[0]["label"]
+
+                new_review = {
+                    "Customer": customer_name,
+                    "Food Item": food_item,
+                    "Rating": rating,
+                    "Review": review_text,
+                    "Emotion": emotion_result,
+                    "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+
+                # Append new review
+                df_reviews = pd.concat([df_reviews, pd.DataFrame([new_review])], ignore_index=True)
+
+                # Save to CSV
+                df_reviews.to_csv(CSV_FILE, index=False)
+
+                st.success(f"✅ Review saved with detected emotion: **{emotion_result}**")
+            else:
+                st.warning("⚠ Please fill in all fields.")
+
+
+with tab6:
+    st.subheader("📊 Reviews Summary")
+
+    # CSV file path
+    CSV_FILE = "food_reviews.csv"
+
+    if os.path.exists(CSV_FILE):
+        df_reviews = pd.read_csv(CSV_FILE)
+
+        # Download button
+        csv_data = df_reviews.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Download Reviews CSV",
+            data=csv_data,
+            file_name="food_reviews.csv",
+            mime="text/csv"
+        )
+
+        # Summary stats
+        st.write(f"**Total Reviews:** {len(df_reviews)}")
+        st.write(f"**Average Rating:** {df_reviews['Rating'].mean():.2f} ⭐")
+
+        # Most ordered food
+        if not df_reviews['Food Item'].empty:
+            most_food = df_reviews["Food Item"].mode()[0]
+            st.write(f"**Most Ordered Dish:** {most_food}")
+
+        # Emotion distribution
+        if "Emotion" in df_reviews.columns:
+            emotion_counts = df_reviews["Emotion"].value_counts()
+            st.markdown("### 📊 Distribution of Emotion")
+            st.bar_chart(emotion_counts)
+
+        # Ratings distribution
+        st.markdown("### 📊 Distribution of Ratings")
+        st.bar_chart(df_reviews["Rating"].value_counts().sort_index())
+
+    else:
+        st.info("No reviews available yet.")
