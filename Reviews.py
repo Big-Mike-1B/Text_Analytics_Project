@@ -13,6 +13,7 @@ from nltk.corpus import stopwords
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.preprocessing import LabelBinarizer
 from sklearn.svm import SVC
 from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score, classification_report
 from transformers import pipeline
@@ -23,8 +24,7 @@ nltk.download('stopwords')
 import base64
 from pathlib import Path
 
-import mysql.connector
-from mysql.connector import Error
+
 from datetime import datetime
 import plotly.express as px
 
@@ -41,13 +41,7 @@ IMAGE_FILES = [
     BASE / "Food2.jpeg"
     ]
 # Upload CSV file
-uploaded_file = st.file_uploader("Upload your Reviews CSV file", type=["csv"])
-
-if uploaded_file is not None:
-    df_reviews = pd.read_csv(uploaded_file)
-    st.success("CSV file successfully loaded!")
-else:
-    st.warning("Please upload a CSV file to proceed.")
+DATA_PATH = BASE / "Reviews.csv"
 
 # ===================== UTILITIES =====================
 def get_base64_image(image_path: Path) -> str:
@@ -106,8 +100,8 @@ st.markdown("""
 #Load Dataset
 @st.cache_data
 def load_data():
-    df = pd.read_csv(uploaded_file)
-    df_sample = df.sample(5000, random_state=42).reset_index(drop=True)
+    df = pd.read_csv("Reviews.csv")
+    df_sample = df.sample(n=min(100, len(df)), random_state=42).reset_index(drop=True)
     return df_sample
 
 
@@ -189,6 +183,22 @@ def train_models():
     svm.fit(X_train, y_train)
     svm_pred = svm.predict(X_test)
 
+    # Align classes for ROC-AUC
+    lb = LabelBinarizer()
+    lb.fit(y_train)  # Fit only on training labels to include all classes
+    y_test_bin = lb.transform(y_test)
+
+    # Handle binary case: lb.transform returns 1D array
+    if y_test_bin.ndim == 1:
+        y_test_bin = np.vstack([1 - y_test_bin, y_test_bin]).T
+
+    # Align predicted probabilities with LabelBinarizer classes
+    dt_probs = pd.DataFrame(dt.predict_proba(X_test), columns=dt.classes_)
+    dt_probs = dt_probs.reindex(columns=lb.classes_, fill_value=0)
+
+    svm_probs = pd.DataFrame(svm.predict_proba(X_test), columns=svm.classes_)
+    svm_probs = svm_probs.reindex(columns=lb.classes_, fill_value=0)
+
     # Evaluation
     metrics = {
         'Model': ['Decision Tree', 'SVM'],
@@ -205,16 +215,13 @@ def train_models():
             f1_score(y_test, svm_pred, average='weighted')
         ],
         'ROC-AUC': [
-            roc_auc_score(pd.get_dummies(y_test), dt.predict_proba(X_test), average='weighted', multi_class='ovr'),
-            roc_auc_score(pd.get_dummies(y_test), svm.predict_proba(X_test), average='weighted', multi_class='ovr')
+            roc_auc_score(y_test_bin, dt_probs, average='weighted', multi_class='ovr'),
+            roc_auc_score(y_test_bin, svm_probs, average='weighted', multi_class='ovr')
         ]
     }
 
     metrics_df = pd.DataFrame(metrics)
     return metrics_df, dt, svm, tfidf
-
-
-metrics_df, dt_model, svm_model, tfidf_vectorizer = train_models()
 
 # Custom CSS for spacing tabs
 st.markdown("""
@@ -236,10 +243,14 @@ with tab1:
     st.bar_chart(df_labeled['emotion'].value_counts())
 
 with tab2:
-
     st.subheader("😊 Emotion Detection")
+
+    # Train models and get metrics
+    metrics_df, dt_model, svm_model, tfidf_vectorizer = train_models()
+
     st.write("Model performance metrics:")
     st.dataframe(metrics_df)
+
     st.bar_chart(metrics_df.set_index('Model')[['Precision', 'Recall', 'F1-score', 'ROC-AUC']])
 
     user_input = st.text_area("Enter text for emotion prediction:")
