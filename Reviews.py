@@ -17,6 +17,7 @@ from sklearn.preprocessing import LabelBinarizer
 from sklearn.svm import SVC
 from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score, classification_report
 from transformers import pipeline
+import torch
 
 
 nltk.download('punkt')
@@ -49,7 +50,7 @@ def get_base64_image(image_path: Path) -> str:
         encoded = base64.b64encode(img_file.read()).decode()
     return f"data:image/jpeg;base64,{encoded}"
 
-@st.cache_data(show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def load_csv(path: Path) -> pd.DataFrame:
     """Robust CSV loader: infers delimiter and handles BOM."""
     for enc in ("utf-8-sig", "utf-8", "latin1"):
@@ -98,7 +99,7 @@ st.markdown("""
 
 
 #Load Dataset
-@st.cache_data
+@st.cache_resource
 def load_data():
     df = pd.read_csv("Reviews.csv")
     df_sample = df.sample(n=min(100, len(df)), random_state=42).reset_index(drop=True)
