@@ -1,45 +1,55 @@
+# Emotion Detection in Reviews with in-app BERT training
+# ------------------------------------------------------
+# This is a comprehensive Streamlit web application that provides:
+# 1. Automated emotion classification of food reviews using pre-trained BERT models
+# 2. Traditional ML model training (Decision Tree & SVM) for comparison
+# 3. Interactive data visualization and analysis
+# 4. User interface for submitting new reviews with real-time emotion detection
+# 5. Word cloud generation to visualize emotion-specific vocabulary patterns
+
+# ===================== IMPORTS AND INITIAL SETUP =====================
+# Import required libraries for data handling, ML, NLP, visualization, and the web app
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-os.environ["STREAMLIT_SERVER_MAX_UPLOAD_SIZE"] = "1024"  # Allow up to 1GB
+# Set Streamlit's maximum upload size to 1GB to handle large CSV files
+os.environ["STREAMLIT_SERVER_MAX_UPLOAD_SIZE"] = "1024"
 import streamlit as st
 import re
+# Natural Language Processing libraries
 import nltk
 from PIL import Image
 from wordcloud import WordCloud
-
 from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
-from torch.utils.data import Dataset, DataLoader
+# Machine Learning libraries
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.preprocessing import LabelBinarizer
-from transformers import BertTokenizer, BertForSequenceClassification
 from sklearn.svm import SVC
 from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score, classification_report
 from transformers import pipeline
-import torch
-from torch.optim import AdamW
-from tqdm import tqdm
-from imblearn.over_sampling import RandomOverSampler
-
+# Download required NLTK data packages
 nltk.download('punkt')
+nltk.download('punkt_tab')
 nltk.download('stopwords')
+# File handling and encoding utilities
 import base64
 from pathlib import Path
-
-
+# Database connectivity (MySQL)
+import mysql.connector
+from mysql.connector import Error
 from datetime import datetime
+import plotly.express as px
 
 
-
-
-# ===================== PAGE CONFIG =====================
+# -------------------- STREAMLIT PAGE CONFIG --------------------
+# Configure the Streamlit page (title, icon, layout)
 st.set_page_config(page_title="Amazon Fine Food Reviews", layout="wide", page_icon="⭐⭐⭐⭐⭐")
 
 # ===================== FILE PATHS =====================
+# Set up file locations and basic settings for the app
 BASE = Path(__file__).parent
 IMAGE_FILES = [
     BASE / "Food.jpeg",
@@ -49,36 +59,37 @@ IMAGE_FILES = [
 # Upload CSV file
 DATA_PATH = BASE / "Reviews.csv"
 
-# ===================== UTILITIES =====================
+# -------------------- UTILITIES ----------------------
+#Convert an image file to base64 encoding for embedding in HTML.
 def get_base64_image(image_path: Path) -> str:
     with open(image_path, "rb") as img_file:
         encoded = base64.b64encode(img_file.read()).decode()
     return f"data:image/jpeg;base64,{encoded}"
 
-@st.cache_resource(show_spinner=False)
-def load_csv(path: Path) -> pd.DataFrame:
-    """Robust CSV loader: infers delimiter and handles BOM."""
+ # Cache results to avoid reloading same file
+@st.cache_data(show_spinner=False)
+def load_csv_auto(path: Path) -> pd.DataFrame:
+    """Robust CSV loader that automatically detects encoding and delimiter."""
+    # Try different encodings in order of preference
     for enc in ("utf-8-sig", "utf-8", "latin1"):
         try:
             return pd.read_csv(path, sep=None, engine="python", encoding=enc, low_memory=False)
         except Exception:
             continue
-    # last attempt with defaults to surface a clear error
-    return pd.read_csv(path, low_memory=False)
+    return pd.read_csv(path, low_memory=False)  # last attempt with defaults to surface a clear error
 
 # ===================== HEADER IMAGE =====================
 # Initialize index in session state
 if "img_index" not in st.session_state:
     st.session_state.img_index = 0
 
-
-
 # Get current image
 current_image = IMAGE_FILES[st.session_state.img_index]
 
-# Display current image
+# Display current header image
 if current_image.exists():
     try:
+        # Convert image to base64 and embed in HTML for display
         image_base64 = get_base64_image(current_image)
         st.markdown(
             f"""
@@ -86,39 +97,44 @@ if current_image.exists():
                 <img src="{image_base64}" style="width:100%; max-height:250px; object-fit:cover;" alt="Header Image">
             </div>
             """,
-            unsafe_allow_html=True
+            unsafe_allow_html=True  # Allow HTML rendering in Streamlit
         )
     except Exception as e:
         st.image(str(current_image), use_container_width=True)
 else:
     st.warning(f"Image not found: {current_image.name}")
 
-# Move to the next image
+# Move to the next image for the next page refresh
 st.session_state.img_index = (st.session_state.img_index + 1) % len(IMAGE_FILES)
 
-# ===================== INTRO =====================
+# =====================APPLICATION INTRO =====================
 st.markdown("""
 ###  🤗😤 Emotion-based on Review
 
 """)
 
-
+# ===================== DATA LOADING AND PREPROCESSING =====================
 #Load Dataset
-@st.cache_resource
+@st.cache_data
 def load_data():
-    df = pd.read_csv("Reviews.csv")
-    df_sample = df.sample(n=min(100, len(df)), random_state=42).reset_index(drop=True)
+    df = pd.read_csv("Reviews_7k.csv")
+        
+    # Sample up to 5000 rows, or all rows if fewer than 5000
+    sample_size = min(5000, len(df))
+    df_sample = df.sample(sample_size, random_state=42).reset_index(drop=True)
     return df_sample
 
-
+# Load the sample dataset
 df_reviews = load_data()
 
-# Auto-label emotions
+# Automatically label emotions in review texts using a pre-trained BERT model.
 @st.cache_resource
 def label_emotions(data):
+    # Load pre-trained emotion classification pipeline
     classifier = pipeline("text-classification",
                           model="bhadresh-savani/distilbert-base-uncased-emotion",
                           top_k=None)
+    # Process each review text
     emotions = []
     for text in data['Text']:
         try:
@@ -128,37 +144,41 @@ def label_emotions(data):
             emotions.append(top_emotion)
         except:
             emotions.append("neutral")
+    # Add emotion labels to the dataframe
     data['emotion'] = emotions
     return data
 
-
+# Apply emotion labeling to the review dataset
 df_labeled = label_emotions(df_reviews)
 
-
-labels_list = sorted(df_labeled["emotion"].unique())
-label_to_id = {label: idx for idx, label in enumerate(labels_list)}
-id_to_label = {idx: label for label, idx in label_to_id.items()}
-
+# ===================== TEXT PREPROCESSING =====================
 # Clean Text
 def clean_text(texts):
     cleaned = []
     for text in texts:
-        text = str(text).lower()
-        text = re.sub(r'<.*?>', " ", text)  # Remove HTML
+        text = str(text).lower()  # Convert to string and lowercase
+        text = re.sub(r'<.*?>', " ", text)  # Remove HTML tags
         text = re.sub(r'[^\w\s]', "", text)  # Remove punctuation
         text = re.sub(r'\d+', " ", text)  # Remove digits
-        text = re.sub(r'\s+', " ", text).strip()
+        text = re.sub(r'\s+', " ", text).strip()  #replace multiple spaces with single space
         cleaned.append(text)
     return cleaned
 
-
+# Apply text cleaning to the review texts
 df_labeled['clean_text'] = clean_text(df_labeled['Text'])
 
+# ===================== TEXT TOKENIZATION AND ANALYSIS =====================
+# Tokenize all cleaned text into individual words
+words = word_tokenize(' '.join(df_labeled['clean_text']))
+tok_text = pd.DataFrame({'Tokens': words})
 
+# Display stop words from the nltk
+stop_words_disp = set(stopwords.words('english'))
 
+# Removal of the stopwords
+filtered_text = [word for word in words if word.lower() not in stop_words_disp]
 
-
-# Word Clouds
+# Generate and display a word cloud for a specific emotion category.
 def plot_wordcloud(emotion):
     text = " ".join(df_labeled[df_labeled['emotion'] == emotion]['clean_text'])
     wordcloud = WordCloud(width=800, height=400, background_color='white').generate(text)
@@ -167,53 +187,30 @@ def plot_wordcloud(emotion):
     st.pyplot(plt)
 
 
-# Model Training
+# Train traditional machine learning models for emotion classification.
 def train_models():
+    # Prepare features (X) and target labels (y)
     X = df_labeled['clean_text']
     y = df_labeled['emotion']
 
-    # 4. TF-IDF Vectorization
-
+    # Convert text to numerical features using TF-IDF
     tfidf = TfidfVectorizer()
-    X_train_tfidf = tfidf.fit_transform(X)
+    X_tfidf = tfidf.fit_transform(X)
 
+    # Split data into training (80%) and testing (20%) sets
+    X_train, X_test, y_train, y_test = train_test_split(X_tfidf, y, test_size=0.2, random_state=42)
 
-    X_train, X_test, y_train, y_test = train_test_split(X_train_tfidf, y, test_size=0.2, random_state=42
-)
-
-    ros = RandomOverSampler(random_state=42)
-    X_train_resampled, y_train_resampled = ros.fit_resample(X_train, y_train)
-
-
-    # Decision Tree
-    dt = DecisionTreeClassifier(class_weight="balanced")
-    dt.fit(X_train_resampled, y_train_resampled)
+    # Decision Tree Model
+    dt = DecisionTreeClassifier()
+    dt.fit(X_train, y_train)
     dt_pred = dt.predict(X_test)
 
-    # SVM
-    svm = SVC(class_weight="balanced",probability=True)
-    svm.fit(X_train_resampled, y_train_resampled)
+    # SVM Model
+    svm = SVC(probability=True)
+    svm.fit(X_train, y_train)
     svm_pred = svm.predict(X_test)
 
-
-
-    # Align classes for ROC-AUC
-    lb = LabelBinarizer()
-    lb.fit(y_train)  # Fit only on training labels to include all classes
-    y_test_bin = lb.transform(y_test)
-
-    # Handle binary case: lb.transform returns 1D array
-    if y_test_bin.ndim == 1:
-        y_test_bin = np.vstack([1 - y_test_bin, y_test_bin]).T
-
-    # Align predicted probabilities with LabelBinarizer classes
-    dt_probs = pd.DataFrame(dt.predict_proba(X_test), columns=dt.classes_)
-    dt_probs = dt_probs.reindex(columns=lb.classes_, fill_value=0)
-
-    svm_probs = pd.DataFrame(svm.predict_proba(X_test), columns=svm.classes_)
-    svm_probs = svm_probs.reindex(columns=lb.classes_, fill_value=0)
-
-    # Evaluation
+    # Model Evaluation
     metrics = {
         'Model': ['Decision Tree', 'SVM'],
         'Precision': [
@@ -229,61 +226,19 @@ def train_models():
             f1_score(y_test, svm_pred, average='weighted')
         ],
         'ROC-AUC': [
-            roc_auc_score(y_test_bin, dt_probs, average='weighted', multi_class='ovr'),
-            roc_auc_score(y_test_bin, svm_probs, average='weighted', multi_class='ovr')
+            roc_auc_score(pd.get_dummies(y_test), dt.predict_proba(X_test), average='weighted', multi_class='ovr'),
+            roc_auc_score(pd.get_dummies(y_test), svm.predict_proba(X_test), average='weighted', multi_class='ovr')
         ]
     }
 
+    # Convert metrics to DataFrame for easy display and comparison
     metrics_df = pd.DataFrame(metrics)
     return metrics_df, dt, svm, tfidf
 
-# 4. BERT Dataset + Model
-# ------------------------------
-class TweetDataset(Dataset):
-    def __init__(self, texts, labels, tokenizer, max_len=64):
-        self.texts = texts
-        self.labels = labels
-        self.tokenizer = tokenizer
-        self.max_len = max_len
+# Train models and store results
+metrics_df, dt_model, svm_model, tfidf_vectorizer = train_models()
 
-    def __len__(self):
-        return len(self.texts)
-
-    def __getitem__(self, idx):
-        text = str(self.texts[idx])
-        inputs = self.tokenizer(text, max_length=self.max_len, truncation=True, padding='max_length', return_tensors="pt")
-        inputs = {k: v.squeeze(0) for k, v in inputs.items()}
-        inputs["labels"] = torch.tensor(self.labels[idx], dtype=torch.long)
-        return inputs
-
-@st.cache_resource
-def train_bert_model(df):
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=len(labels_list))
-
-    # Encode labels
-    encoded_labels = [label_to_id[label] for label in df_labeled["emotion"]]
-
-    dataset = TweetDataset(df_labeled["clean_text"], encoded_labels, tokenizer)
-    loader = DataLoader(dataset, batch_size=4, shuffle=True)
-
-    optimizer = AdamW(model.parameters(), lr=2e-5)
-
-    model.train()
-    for epoch in range(2):  # Small training for demo
-        loop = tqdm(loader, leave=True)
-        for batch in loop:
-            optimizer.zero_grad()
-            outputs = model(input_ids=batch["input_ids"],
-                            attention_mask=batch["attention_mask"],
-                            labels=batch["labels"])
-            loss = outputs.loss
-            loss.backward()
-            optimizer.step()
-    return tokenizer, model
-
-tokenizer, bert_model = train_bert_model(df_reviews)
-
+# ===================== STREAMLIT USER INTERFACE =====================
 # Custom CSS for spacing tabs
 st.markdown("""
     <style>
@@ -292,9 +247,12 @@ st.markdown("""
     }
     </style>
     """, unsafe_allow_html=True)
+
+# Create tabbed interface for different app sections
 tab1, tab2, tab3, tab4,tab5, tab6 = st.tabs(["📊 Dataset", "😊 Emotion Detection", "☁ Word Clouds", "✅ Conclusion","User Interface","Submitted Review"])
 
 #Streamlit Pages
+#TAB 1: DATASET EXPLORATION
 with tab1:
     st.subheader("📊 Dataset content")
 
@@ -303,50 +261,34 @@ with tab1:
     st.write("Emotion distribution in the sample:")
     st.bar_chart(df_labeled['emotion'].value_counts())
 
+#TAB 2: EMOTION DETECTION AND MODEL PERFORMANCE
 with tab2:
+
     st.subheader("😊 Emotion Detection")
-
-    # Train models and get metrics
-    metrics_df, dt_model, svm_model, tfidf_vectorizer = train_models()
-
     st.write("Model performance metrics:")
     st.dataframe(metrics_df)
-
     st.bar_chart(metrics_df.set_index('Model')[['Precision', 'Recall', 'F1-score', 'ROC-AUC']])
 
+    # Allow users to input text and get real-time emotion predictions
     user_input = st.text_area("Enter text for emotion prediction:")
     if st.button("Predict Emotion"):
-        col1, col2 = st.columns(2)
-        with col1:
-            if user_input.strip():
-                cleaned_input = clean_text([user_input])
-                input_tfidf = tfidf_vectorizer.transform(cleaned_input)
-                pred_dt = dt_model.predict(input_tfidf)[0]
-                pred_svm = svm_model.predict(input_tfidf)[0]
-                st.write(f"*Decision Tree prediction:* {pred_dt}")
-                st.write(f"*SVM prediction:* {pred_svm}")
+        if user_input.strip():
+            cleaned_input = clean_text([user_input])    # Apply same text cleaning as used in training
+            input_tfidf = tfidf_vectorizer.transform(cleaned_input)  # Convert text to TF-IDF features using the trained vectorizer
+            # Get predictions from both trained models
+            pred_dt = dt_model.predict(input_tfidf)[0]
+            pred_svm = svm_model.predict(input_tfidf)[0]
+            st.write(f"*Decision Tree prediction:* {pred_dt}")
+            st.write(f"*SVM prediction:* {pred_svm}")
 
-            with col2:
-                # BERT Prediction
-                bert_model.eval()
-                inputs = tokenizer(user_input, max_length=64, truncation=True, padding="max_length",
-                                   return_tensors="pt")
-                with torch.no_grad():
-                    outputs = bert_model(**inputs)
-                    logits = outputs.logits
-                    pred_id = torch.argmax(logits, dim=1).item()
-                    bert_pred = id_to_label[pred_id]
-
-                    st.write(f"*Bert prediction:* {bert_pred}")
-
-
-
+#TAB 3: WORD CLOUD VISUALIZATION
 with tab3:
     st.subheader("☁ Word clouds content")
     emotions = df_labeled['emotion'].unique()
     emotion_choice = st.selectbox("Select emotion:", emotions)
     plot_wordcloud(emotion_choice)
 
+#TAB 4: CONCLUSIONS AND INSIGHTS
 with tab4:
     st.write("✅ Conclusion content here")
     st.subheader("Conclusion")
@@ -357,42 +299,47 @@ with tab4:
     - Auto-labeling was done using a pre-trained RoBERTa model.
     """)
 
-
+#TAB 5: USER REVIEW SUBMISSION INTERFACE
 with tab5:
-    # ===================== LOAD EMOTION MODEL =====================
+    # Load the emotion classification model for real-time prediction.
     @st.cache_resource
     def load_emotion_model():
         return pipeline("text-classification", model="bhadresh-savani/distilbert-base-uncased-emotion")
 
 
+    # Load the emotion classification model
     emotion_classifier = load_emotion_model()
 
-    # ===================== PAGE CONFIG =====================
+    # Set page configuration for this section
     st.set_page_config(page_title="🍽 Food Review App", page_icon="🍔", layout="centered")
     st.title("🍽 Food Review & Feedback System")
     st.write("Share your experience with our dishes!")
 
-    # ===================== CSV FILE PATH =====================
+    # File to store submitted reviews
     CSV_FILE = "food_reviews.csv"
 
-    # ===================== LOAD EXISTING REVIEWS =====================
+    # Load existing reviews if the file exists
     if os.path.exists(CSV_FILE):
         df_reviews = pd.read_csv(CSV_FILE)
     else:
+        # Create empty DataFrame with required columns if file doesn't exist
         df_reviews = pd.DataFrame(columns=["Customer", "Food Item", "Rating", "Review", "Emotion", "Date"])
 
-    # ===================== REVIEW FORM =====================
+# ===================== REVIEW SUBMISSION FORM  =====================
+    # Create a form that clears after submission
     with st.form("review_form", clear_on_submit=True):
         customer_name = st.text_input("👤 Your Name")
         food_item = st.text_input("🍔 Food Item")
         rating = st.slider("⭐ Rating", 1, 5, 5)
         review_text = st.text_area("📝 Write your review:", height=150)
-        submitted = st.form_submit_button("💾 Submit Review")
+        submitted = st.form_submit_button("💾 Submit Review")  # Form submission button
 
+        # Process form submission
         if submitted:
             if customer_name.strip() and food_item.strip() and review_text.strip():
                 emotion_result = emotion_classifier(review_text)[0]["label"]
 
+                # Create new review record
                 new_review = {
                     "Customer": customer_name,
                     "Food Item": food_item,
@@ -402,17 +349,17 @@ with tab5:
                     "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
 
-                # Append new review
+                # Add new review to existing dataframe
                 df_reviews = pd.concat([df_reviews, pd.DataFrame([new_review])], ignore_index=True)
 
-                # Save to CSV
+                # Save updated dataframe to CSV file
                 df_reviews.to_csv(CSV_FILE, index=False)
 
                 st.success(f"✅ Review saved with detected emotion: **{emotion_result}**")
             else:
                 st.warning("⚠ Please fill in all fields.")
 
-
+#TAB 6: REVIEW ANALYTICS AND MANAGEMENT
 with tab6:
     st.subheader("📊 Reviews Summary")
 
@@ -422,7 +369,7 @@ with tab6:
     if os.path.exists(CSV_FILE):
         df_reviews = pd.read_csv(CSV_FILE)
 
-        # Download button
+        # Create downloadable CSV file
         csv_data = df_reviews.to_csv(index=False).encode("utf-8")
         st.download_button(
             label="📥 Download Reviews CSV",
