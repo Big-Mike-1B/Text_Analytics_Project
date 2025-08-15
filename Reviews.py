@@ -8,17 +8,22 @@ import re
 import nltk
 from PIL import Image
 from wordcloud import WordCloud
+
 from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
+from torch.utils.data import Dataset, DataLoader
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.preprocessing import LabelBinarizer
+from transformers import BertTokenizer, BertForSequenceClassification
 from sklearn.svm import SVC
 from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score, classification_report
 from transformers import pipeline
 import torch
-
+from torch.optim import AdamW
+from tqdm import tqdm
+from imblearn.over_sampling import RandomOverSampler
 
 nltk.download('punkt')
 nltk.download('stopwords')
@@ -130,6 +135,10 @@ def label_emotions(data):
 df_labeled = label_emotions(df_reviews)
 
 
+labels_list = sorted(df_labeled["emotion"].unique())
+label_to_id = {label: idx for idx, label in enumerate(labels_list)}
+id_to_label = {idx: label for label, idx in label_to_id.items()}
+
 # Clean Text
 def clean_text(texts):
     cleaned = []
@@ -145,15 +154,9 @@ def clean_text(texts):
 
 df_labeled['clean_text'] = clean_text(df_labeled['Text'])
 
-#Tokenization
-words = word_tokenize(' '.join(df_labeled['clean_text']))
-tok_text = pd.DataFrame({'Tokens': words})
 
-# Display stop words from the nltk
-stop_words_disp = set(stopwords.words('english'))
 
-# Removal of the stopwords
-filtered_text = [word for word in words if word.lower() not in stop_words_disp]
+
 
 # Word Clouds
 def plot_wordcloud(emotion):
@@ -169,20 +172,30 @@ def train_models():
     X = df_labeled['clean_text']
     y = df_labeled['emotion']
 
-    tfidf = TfidfVectorizer()
-    X_tfidf = tfidf.fit_transform(X)
+    # 4. TF-IDF Vectorization
 
-    X_train, X_test, y_train, y_test = train_test_split(X_tfidf, y, test_size=0.2, random_state=42)
+    tfidf = TfidfVectorizer()
+    X_train_tfidf = tfidf.fit_transform(X)
+
+
+    X_train, X_test, y_train, y_test = train_test_split(X_train_tfidf, y, test_size=0.2, random_state=42
+)
+
+    ros = RandomOverSampler(random_state=42)
+    X_train_resampled, y_train_resampled = ros.fit_resample(X_train, y_train)
+
 
     # Decision Tree
-    dt = DecisionTreeClassifier()
-    dt.fit(X_train, y_train)
+    dt = DecisionTreeClassifier(class_weight="balanced")
+    dt.fit(X_train_resampled, y_train_resampled)
     dt_pred = dt.predict(X_test)
 
     # SVM
-    svm = SVC(probability=True)
-    svm.fit(X_train, y_train)
+    svm = SVC(class_weight="balanced",probability=True)
+    svm.fit(X_train_resampled, y_train_resampled)
     svm_pred = svm.predict(X_test)
+
+
 
     # Align classes for ROC-AUC
     lb = LabelBinarizer()
@@ -224,6 +237,53 @@ def train_models():
     metrics_df = pd.DataFrame(metrics)
     return metrics_df, dt, svm, tfidf
 
+# 4. BERT Dataset + Model
+# ------------------------------
+class TweetDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, max_len=64):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = str(self.texts[idx])
+        inputs = self.tokenizer(text, max_length=self.max_len, truncation=True, padding='max_length', return_tensors="pt")
+        inputs = {k: v.squeeze(0) for k, v in inputs.items()}
+        inputs["labels"] = torch.tensor(self.labels[idx], dtype=torch.long)
+        return inputs
+
+@st.cache_resource
+def train_bert_model(df):
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=len(labels_list))
+
+    # Encode labels
+    encoded_labels = [label_to_id[label] for label in df_labeled["emotion"]]
+
+    dataset = TweetDataset(df_labeled["clean_text"], encoded_labels, tokenizer)
+    loader = DataLoader(dataset, batch_size=4, shuffle=True)
+
+    optimizer = AdamW(model.parameters(), lr=2e-5)
+
+    model.train()
+    for epoch in range(2):  # Small training for demo
+        loop = tqdm(loader, leave=True)
+        for batch in loop:
+            optimizer.zero_grad()
+            outputs = model(input_ids=batch["input_ids"],
+                            attention_mask=batch["attention_mask"],
+                            labels=batch["labels"])
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
+    return tokenizer, model
+
+tokenizer, bert_model = train_bert_model(df_reviews)
+
 # Custom CSS for spacing tabs
 st.markdown("""
     <style>
@@ -256,13 +316,30 @@ with tab2:
 
     user_input = st.text_area("Enter text for emotion prediction:")
     if st.button("Predict Emotion"):
-        if user_input.strip():
-            cleaned_input = clean_text([user_input])
-            input_tfidf = tfidf_vectorizer.transform(cleaned_input)
-            pred_dt = dt_model.predict(input_tfidf)[0]
-            pred_svm = svm_model.predict(input_tfidf)[0]
-            st.write(f"*Decision Tree prediction:* {pred_dt}")
-            st.write(f"*SVM prediction:* {pred_svm}")
+        col1, col2 = st.columns(2)
+        with col1:
+            if user_input.strip():
+                cleaned_input = clean_text([user_input])
+                input_tfidf = tfidf_vectorizer.transform(cleaned_input)
+                pred_dt = dt_model.predict(input_tfidf)[0]
+                pred_svm = svm_model.predict(input_tfidf)[0]
+                st.write(f"*Decision Tree prediction:* {pred_dt}")
+                st.write(f"*SVM prediction:* {pred_svm}")
+
+            with col2:
+                # BERT Prediction
+                bert_model.eval()
+                inputs = tokenizer(user_input, max_length=64, truncation=True, padding="max_length",
+                                   return_tensors="pt")
+                with torch.no_grad():
+                    outputs = bert_model(**inputs)
+                    logits = outputs.logits
+                    pred_id = torch.argmax(logits, dim=1).item()
+                    bert_pred = id_to_label[pred_id]
+
+                    st.write(f"*Bert prediction:* {bert_pred}")
+
+
 
 with tab3:
     st.subheader("☁ Word clouds content")
